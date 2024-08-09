@@ -509,7 +509,6 @@ def write_state(model, x, y, logits, loss, filename):
         write_tensors(grads, model.config.n_layer, file, "float32")
     print(f"wrote {filename}")
 
-
 def write_tokenizer(enc, filename):
     n = enc.max_token_value + 1
     header = torch.zeros(256, dtype=torch.int32)
@@ -527,54 +526,14 @@ def write_tokenizer(enc, filename):
             file.write(b)  # Write the actual bytes
     print(f"wrote {filename}")
 
-
 def print0(*args, **kwargs):
     # modified print that only prints from the master process
     # if this is not a distributed run, it's just a print
     if int(os.environ.get("RANK", 0)) == 0:
         print(*args, **kwargs)
 
-
-def save_model(model, output_dir, filename_prefix):
-    """Save the model using PyTorch's standard serialization method."""
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Save the model in float32
-    float32_path = os.path.join(output_dir, f"{filename_prefix}_float32.pt")
-    torch.save(model.state_dict(), float32_path)
-    print(f"Model (float32) saved to: {float32_path}")
-
-    # Save the model in bfloat16
-    model.to(torch.bfloat16)
-    bfloat16_path = os.path.join(output_dir, f"{filename_prefix}_bfloat16.pt")
-    torch.save(model.state_dict(), bfloat16_path)
-    print(f"Model (bfloat16) saved to: {bfloat16_path}")
-
-
-def save_tokenizer(enc, output_dir, filename):
-    """Save the tokenizer."""
-    os.makedirs(output_dir, exist_ok=True)
-    tokenizer_path = os.path.join(output_dir, filename)
-    torch.save(enc, tokenizer_path)
-    print(f"Tokenizer saved to: {tokenizer_path}")
-
-
-def save_debug_state(x, y, logits, loss, grads, output_dir, filename):
-    """Save the debug state."""
-    os.makedirs(output_dir, exist_ok=True)
-    debug_state_path = os.path.join(output_dir, filename)
-    torch.save({
-        'x': x,
-        'y': y,
-        'logits': logits,
-        'loss': loss,
-        'grads': grads
-    }, debug_state_path)
-    print(f"Debug state saved to: {debug_state_path}")
-
 # -----------------------------------------------------------------------------
 # int main
-
 
 if __name__ == "__main__":
     import time
@@ -807,7 +766,6 @@ if __name__ == "__main__":
                     f.write("s:%d tel:%f\n" % (step, val_loss))
 
         # once in a while perform model inference on the master process
-        print(f"validation loss: {val_loss:.4f}")
         if (args.sample_every > 0 and (step % args.sample_every == 0 or last_step)) and master_process:
             model.eval()
             # before we end, let's also do one round of inference
@@ -828,15 +786,6 @@ if __name__ == "__main__":
         # instead of just < num_iterations (one extra due to <=), only to do
         # the validation/sampling one last time, and then we break right here as we're done.
         if last_step:
-            # Save the float32 and bfloat16 model
-            save_model(raw_model, args.output_dir, f"gpt2_124M")
-
-            # Save the tokenizer
-            save_tokenizer(enc, args.output_dir, "gpt2_tokenizer.pt")
-
-            # Save the debug state
-            save_debug_state(x, y, logits, loss, {n: p.grad for n, p in raw_model.named_parameters()},
-                             args.output_dir, f"gpt2_124M_debug_state.pt")
             break
 
         # --------------- TRAINING SECTION BEGIN -----------------
