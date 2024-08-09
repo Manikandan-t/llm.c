@@ -36,6 +36,8 @@ import torch.distributed as dist
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
+MODEL_OUTPUT_DIR = "model"
+
 
 class NewGELU(nn.Module):
     """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
@@ -471,10 +473,11 @@ def write_model(model, filename, dtype):
     print(f"padded vocab size from {wte.size(0)} to {wte_padded.size(0)}")
     header[7] = wte_padded.size(0) # padded vocab size store in header
     # now write to file
-    with open(filename, "wb") as file:
+    with open(os.path.join(MODEL_OUTPUT_DIR, filename), "wb") as file:
         file.write(header.numpy().tobytes()) # header
         write_tensors(params, model.config.n_layer, file, dtype) # params
     print(f"wrote {filename}")
+
 
 def write_state(model, x, y, logits, loss, filename):
     # the state is used for debugging.
@@ -491,7 +494,7 @@ def write_state(model, x, y, logits, loss, filename):
     wte_grad_padded = pad_vocab(wte_grad, value=0) # (Vp, C) # TODO later maybe pad with nan?
     grads["transformer.wte.weight"] = wte_grad_padded # (Vp, C)
     print(f"padded vocab size in reference grads from {wte_grad.size(0)} to {wte_grad_padded.size(0)}")
-    with open(filename, "wb") as file:
+    with open(os.path.join(MODEL_OUTPUT_DIR, filename), "wb") as file:
         # header
         file.write(header.numpy().tobytes())
         # input x
@@ -506,6 +509,7 @@ def write_state(model, x, y, logits, loss, filename):
         write_tensors(grads, model.config.n_layer, file, "float32")
     print(f"wrote {filename}")
 
+
 def write_tokenizer(enc, filename):
     n = enc.max_token_value + 1
     header = torch.zeros(256, dtype=torch.int32)
@@ -513,7 +517,7 @@ def write_tokenizer(enc, filename):
     header[1] = 2 # tokenizer version = 2 (1 -> 2: includes EOT token)
     header[2] = n # number of tokens
     header[3] = enc.eot_token # EOT token
-    with open(filename, "wb") as file:
+    with open(os.path.join(MODEL_OUTPUT_DIR, filename), "wb") as file:
         file.write(header.numpy().tobytes())
         for i in range(n):
             b = enc.decode_bytes([i])
@@ -523,14 +527,54 @@ def write_tokenizer(enc, filename):
             file.write(b)  # Write the actual bytes
     print(f"wrote {filename}")
 
-# -----------------------------------------------------------------------------
-# int main
 
 def print0(*args, **kwargs):
     # modified print that only prints from the master process
     # if this is not a distributed run, it's just a print
     if int(os.environ.get("RANK", 0)) == 0:
         print(*args, **kwargs)
+
+
+def save_model(model, output_dir, filename_prefix):
+    """Save the model using PyTorch's standard serialization method."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save the model in float32
+    float32_path = os.path.join(output_dir, f"{filename_prefix}_float32.pt")
+    torch.save(model.state_dict(), float32_path)
+    print(f"Model (float32) saved to: {float32_path}")
+
+    # Save the model in bfloat16
+    model.to(torch.bfloat16)
+    bfloat16_path = os.path.join(output_dir, f"{filename_prefix}_bfloat16.pt")
+    torch.save(model.state_dict(), bfloat16_path)
+    print(f"Model (bfloat16) saved to: {bfloat16_path}")
+
+
+def save_tokenizer(enc, output_dir, filename):
+    """Save the tokenizer."""
+    os.makedirs(output_dir, exist_ok=True)
+    tokenizer_path = os.path.join(output_dir, filename)
+    torch.save(enc, tokenizer_path)
+    print(f"Tokenizer saved to: {tokenizer_path}")
+
+
+def save_debug_state(x, y, logits, loss, grads, output_dir, filename):
+    """Save the debug state."""
+    os.makedirs(output_dir, exist_ok=True)
+    debug_state_path = os.path.join(output_dir, filename)
+    torch.save({
+        'x': x,
+        'y': y,
+        'logits': logits,
+        'loss': loss,
+        'grads': grads
+    }, debug_state_path)
+    print(f"Debug state saved to: {debug_state_path}")
+
+# -----------------------------------------------------------------------------
+# int main
+
 
 if __name__ == "__main__":
     import time
@@ -542,36 +586,36 @@ if __name__ == "__main__":
     # and save model weights and debug state to disk on the first iteration
     parser = argparse.ArgumentParser()
     # file system input / output
-    parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_val.bin", help="input .bin to train on")
-    parser.add_argument("--input_val_bin", type=str, default="", help="input .bin to eval validation loss on")
-    parser.add_argument("--output_dir", type=str, default="", help="output directory to which to write logs and checkpoints")
+    parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_train.bin", help="input .bin to train on")
+    parser.add_argument("--input_val_bin", type=str, default="dev/data/tinyshakespeare//tiny_shakespeare_val.bin", help="input .bin to eval validation loss on")
+    parser.add_argument("--output_dir", type=str, default=MODEL_OUTPUT_DIR, help="output directory to which to write logs and checkpoints")
     parser.add_argument("--model", type=str, default="gpt2", help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d12|d24|d36|d48")
     # token layout for each step of the optimization
-    parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
-    parser.add_argument("--sequence_length", type=int, default=64, help="sequence length")
-    parser.add_argument("--total_batch_size", type=int, default=256, help="total desired batch size, in units of #tokens")
+    parser.add_argument("--batch_size", type=int, default=1, help="batch size, in units of #batch dimensions")
+    parser.add_argument("--sequence_length", type=int, default=1024, help="sequence length")
+    parser.add_argument("--total_batch_size", type=int, default=1024, help="total desired batch size, in units of #tokens")
     # workload (number of steps)
-    parser.add_argument("--num_iterations", type=int, default=10, help="number of iterations to run")
+    parser.add_argument("--num_iterations", type=int, default=10, help="number of iterations to run -> number of steps")
     parser.add_argument("--inference_only", type=int, default=0, help="only run inference")
     # optimization
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate warmup iterations")
-    parser.add_argument("--warmup_iters", type=int, default=0, help="learning rate warmup iterations")
+    parser.add_argument("--learning_rate", type=float, default=6e-4, help="learning rate warmup iterations")
+    parser.add_argument("--warmup_iters", type=int, default=2000, help="learning rate warmup iterations")
     parser.add_argument("--learning_rate_decay_frac", type=float, default=1.0, help="learning rate warmup iterations")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="maximum gradient magnitude")
     # evaluation
-    parser.add_argument("--val_loss_every", type=int, default=0, help="every how mant steps to evaluate val loss?")
+    parser.add_argument("--val_loss_every", type=int, default=0, help="every how many steps to evaluate val loss?")
     parser.add_argument("--val_max_steps", type=int, default=20, help="how many batches of val to average?")
-    parser.add_argument("--sample_every", type=int, default=0, help="how often to sample from the model?")
+    parser.add_argument("--sample_every", type=int, default=10, help="how often to sample from the model?")
     # debugging
     parser.add_argument("--overfit_single_batch", type=int, default=1, help="overfit just one batch of data")
     # numerics
     parser.add_argument("--tensorcores", type=int, default=0, help="use tensorcores")
     # memory management
-    parser.add_argument("--device", type=str, default="", help="by default we autodetect, or set it here")
+    parser.add_argument("--device", type=str, default="cuda", help="by default we autodetect, or set it here")
     parser.add_argument("--compile", type=int, default=0, help="torch.compile the model")
-    parser.add_argument("--flash", type=int, default=0, help="use flash attention")
-    parser.add_argument("--dtype", type=str, default="float32", help="float32|float16|bfloat16")
+    parser.add_argument("--flash", type=int, default=1, help="use flash attention")
+    parser.add_argument("--dtype", type=str, default="bfloat16", help="float32|float16|bfloat16")
     parser.add_argument("--zero_stage", type=int, default=0, help="zero redundancy optimizer stage (0/1/2/3)")
     # python -> C bridge
     parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
@@ -745,9 +789,7 @@ if __name__ == "__main__":
         last_step = (step == args.num_iterations)
 
         # once in a while evaluate the validation dataset
-        if (args.val_loss_every > 0 \
-            and (step % args.val_loss_every == 0 or last_step)) \
-            and (val_loader is not None):
+        if (args.val_loss_every > 0 and (step % args.val_loss_every == 0 or last_step)) and (val_loader is not None):
             model.eval()
             val_loader.reset()
             with torch.no_grad():
@@ -765,14 +807,14 @@ if __name__ == "__main__":
                     f.write("s:%d tel:%f\n" % (step, val_loss))
 
         # once in a while perform model inference on the master process
-        if (args.sample_every > 0 \
-            and (step % args.sample_every == 0 or last_step)) \
-            and master_process:
+        print(f"validation loss: {val_loss:.4f}")
+        if (args.sample_every > 0 and (step % args.sample_every == 0 or last_step)) and master_process:
             model.eval()
             # before we end, let's also do one round of inference
             # we'll kick off the generation with "<|endoftext|>", which designates the start of a new sequence
-            start_ids = [enc.eot_token]
-            xg = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+            # start_ids = [enc.eot_token]
+            tokens = enc.encode("Hello, I'm a language model,")
+            xg = (torch.tensor(tokens, dtype=torch.long, device=device)[None, ...])
             max_new_tokens = 32
             temperature = 1.0
             top_k = 40
@@ -786,6 +828,15 @@ if __name__ == "__main__":
         # instead of just < num_iterations (one extra due to <=), only to do
         # the validation/sampling one last time, and then we break right here as we're done.
         if last_step:
+            # Save the float32 and bfloat16 model
+            save_model(raw_model, args.output_dir, f"gpt2_124M")
+
+            # Save the tokenizer
+            save_tokenizer(enc, args.output_dir, "gpt2_tokenizer.pt")
+
+            # Save the debug state
+            save_debug_state(x, y, logits, loss, {n: p.grad for n, p in raw_model.named_parameters()},
+                             args.output_dir, f"gpt2_124M_debug_state.pt")
             break
 
         # --------------- TRAINING SECTION BEGIN -----------------
